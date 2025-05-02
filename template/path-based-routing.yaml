@@ -1,0 +1,252 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS CloudFormation template to set up an S3 bucket, security group, IAM roles and policies,
+  EC2 instances, and an Application Load Balancer with path-based routing.
+
+Parameters:
+  KeyPairName:
+    Type: String
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+  BucketName:
+    Type: String
+    Default: advanced-request-routing-bucket-123
+    Description: Name of the S3 bucket to be created
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+
+  # S3 Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+
+  # Security Group
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: advanced-routing-sec-grp
+      GroupDescription: Enable HTTP access
+      VpcId: !Ref DefaultVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # IAM Role
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: advanced-routing-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: advanced-routing-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub arn:aws:s3:::${BucketName}/*
+                  - !Sub arn:aws:s3:::${BucketName}
+
+  # Instance Profile
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IAMRole
+
+  # Default VPC
+  DefaultVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.31.0.0/16
+      Tags:
+        - Key: Name
+          Value: default-vpc
+
+  # Subnets (Assuming default subnets exist)
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DefaultVPC
+      CidrBlock: 172.31.0.0/20
+      AvailabilityZone: us-east-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: default-subnet-a
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DefaultVPC
+      CidrBlock: 172.31.16.0/20
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: default-subnet-b
+
+  # EC2 Instance - dev
+  DevInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetA
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        - Key: Name
+          Value: dev
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          mkdir /var/www/html/dev
+          cd /var/www/html/dev
+          aws s3 cp s3://${BucketName}/hw-dev.css ./
+          aws s3 cp s3://${BucketName}/hw-dev-py.css ./
+          aws s3 cp s3://${BucketName}/python.png ./
+          aws s3 cp s3://${BucketName}/apache.svg ./
+          aws s3 cp s3://${BucketName}/dev-index.html ./index.html
+          cd /var/www/html
+          aws s3 cp s3://${BucketName}/hw-dev.css ./
+          aws s3 cp s3://${BucketName}/hw-dev-py.css ./
+          aws s3 cp s3://${BucketName}/python.png ./
+          aws s3 cp s3://${BucketName}/apache.svg ./
+          aws s3 cp s3://${BucketName}/dev-root-index.html ./index.html
+          systemctl restart httpd
+
+  # EC2 Instance - stg
+  StgInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetB
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        - Key: Name
+          Value: stg
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          mkdir /var/www/html/blue
+          cd /var/www/html/blue
+          aws s3 cp s3://${BucketName}/hw-stg.css ./
+          aws s3 cp s3://${BucketName}/hw-stg-py.css ./
+          aws s3 cp s3://${BucketName}/python.png ./
+          aws s3 cp s3://${BucketName}/apache.svg ./
+          aws s3 cp s3://${BucketName}/stg-index.html ./index.html
+          cd /var/www/html
+          aws s3 cp s3://${BucketName}/hw-stg.css ./
+          aws s3 cp s3://${BucketName}/hw-stg-py.css ./
+          aws s3 cp s3://${BucketName}/python.png ./
+          aws s3 cp s3://${BucketName}/apache.svg ./
+          aws s3 cp s3://${BucketName}/stg-root-index.html ./index.html
+          systemctl restart httpd
+
+  # Target Group - dev
+  DevTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: dev-target-group
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref DefaultVPC
+      HealthCheckPath: /dev/index.html
+      TargetType: instance
+      Targets:
+        - Id: !Ref DevInstance
+
+  # Target Group - stg
+  StgTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: stg-target-group
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref DefaultVPC
+      HealthCheckPath: /stg/index.html
+      TargetType: instance
+      Targets:
+        - Id: !Ref StgInstance
+
+  # Application Load Balancer
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: advanced-routing-alb
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      SecurityGroups:
+        - !Ref SecurityGroup
+      Scheme: internet-facing
+      Type: application
+
+  # Listener
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DevTargetGroup
+
+  # Listener Rule - /dev*
+  ListenerRuleDev:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /dev*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref DevTargetGroup
+
+  # Listener Rule - /stg*
+  ListenerRuleStg:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /stg*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref StgTargetGroup
+
